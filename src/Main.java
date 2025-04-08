@@ -1,10 +1,14 @@
-import java.io.BufferedReader;
-import java.io.FileReader;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
 
 public class Main {
     private static final Duration WARNING_TIME = Duration.ofMinutes(5);
@@ -14,76 +18,87 @@ public class Main {
 
     public static void main(String[] args) {
         String fileName = "logs.log";
+        String outputFileName = "out.log";
 
         Map<Integer, Job> mappedJobs = processLogs(fileName);
-        generateReport(mappedJobs);
+        generateReport(mappedJobs,outputFileName);
     }
 
     /**
      * Reads line by line from file and maps each job start and end time by pid
      */
     private static Map<Integer, Job> processLogs(String filename) {
-        Map<Integer, Job> mappedJobs = new HashMap<>();
-        try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
-            String line;
+        Map<Integer, Job> mappedJobs = new ConcurrentHashMap<>();
+        Path logPath = Paths.get(filename);
 
-            while ((line = br.readLine()) != null) {
-                String[] jobParts = line.split(",");
-                if (jobParts.length < 4) {
-                    // skips the lines with malformed jobs
-                    continue;
+        try (Stream<String> lines = Files.lines(logPath)) {
+            lines.parallel().forEach(line -> {
+                String[] parts = line.split(",");
+                if (parts.length < 4) return; // skips the lines with malformed jobs
+
+                try {
+
+                    String timeStr = parts[0].trim();
+                    String description = parts[1].trim();
+                    String event = parts[2].trim().toUpperCase();
+                    int pid = Integer.parseInt(parts[3].trim());
+                    LocalTime timestamp = LocalTime.parse(timeStr, TIME_FORMATTER);
+
+                    mappedJobs.compute(pid, (key, existingJob) -> {
+                        if (existingJob == null) {
+                            existingJob = new Job(pid, description);
+                        }
+                        if (event.equals("START")) {
+                            existingJob.setStart(timestamp);
+                        } else if (event.equals("END")) {
+                            existingJob.setEnd(timestamp);
+                        }
+                        return existingJob;
+                    });
+
+                } catch (Exception e) {
+                    System.err.println("Error parsing line: " + line + " : " + e.getMessage());
                 }
 
-                String time = jobParts[0].trim();
-                String jobDescription = jobParts[1].trim();
-                String event = jobParts[2].trim().toUpperCase();
-                int pid = Integer.parseInt(jobParts[3].trim());
-                LocalTime timestamp = LocalTime.parse(time, TIME_FORMATTER);
-
-                // Retrieve or create the job based on PID
-                Job job = mappedJobs.getOrDefault(pid, new Job(pid, jobDescription));
-
-                if (event.equals("START")) {
-                    job.setStart(timestamp);
-                } else if (event.equals("END")) {
-                    job.setEnd(timestamp);
-                }
-
-                mappedJobs.put(pid, job);
-            }
-
+            });
         } catch (Exception e) {
             System.err.println("Error reading the log file: " + e.getMessage());
         }
         return mappedJobs;
     }
 
-    private static void generateReport(Map<Integer, Job> mappedJobs) {
-        for (Map.Entry<Integer, Job> entry : mappedJobs.entrySet()) {
-            int pid = entry.getKey();
-            Job job = entry.getValue();
+    /**
+     *
+     * Iterate through all the jobs and computes each job duration
+     */
+    private static void generateReport(Map<Integer, Job> mappedJobs, String outputFileName) {
+        List<String> reportLines = mappedJobs.entrySet().parallelStream()
+                .map(entry -> {
+                    int pid = entry.getKey();
+                    Job job = entry.getValue();
 
-            if (job.getStart() == null || job.getEnd() == null) {
-                System.out.println("PID " + pid + " (" + job.getDescription() + ") is missing starting or ending time");
-            } else {
-                Duration duration = Duration.between(job.getStart(), job.getEnd());
+                    if (job.getStart() == null || job.getEnd() == null) {
+                        return "PID " + pid + " (" + job.getDescription() + ") is missing a START or END event.";
+                    } else {
+                        Duration duration = Duration.between(job.getStart(), job.getEnd());
+                        long minutes = duration.toMinutes();
+                        long seconds = duration.minusMinutes(minutes).getSeconds();
+                        String message = String.format("PID %s (%s): Duration: %d min %d sec.", pid, job.getDescription(), minutes, seconds);
+                        if (duration.compareTo(ERROR_TIME) > 0) {
+                            message += " ERROR: Job took longer than 10 minutes.";
+                        } else if (duration.compareTo(WARNING_TIME) > 0) {
+                            message += " WARNING: Job took longer than 5 minutes.";
+                        }
+                        return message;
+                    }
+                })
+                .toList();
 
-                String message = getLogOutput(duration, pid, job);
-                System.out.println(message);
-            }
+        try {
+            Files.write(Paths.get(outputFileName), reportLines);
+            System.out.println("Report successfully written to " + outputFileName);
+        } catch (IOException e) {
+            System.err.println("Error writing report file: " + e.getMessage());
         }
-    }
-
-    private static String getLogOutput(Duration duration, int pid, Job job) {
-        long minutes = duration.toMinutes();
-        long seconds = duration.minusMinutes(minutes).getSeconds();
-        String message = String.format("PID %s (%s): Duration: %d min %d sec.", pid, job.getDescription(), minutes, seconds);
-
-        if (duration.compareTo(ERROR_TIME) > 0) {
-            message += " ERROR: Job took longer than 10 minutes.";
-        } else if (duration.compareTo(WARNING_TIME) > 0) {
-            message += " WARNING: Job took longer than 5 minutes.";
-        }
-        return message;
     }
 }
