@@ -25,9 +25,10 @@ public class Main {
     }
 
     /**
-     * Reads line by line from file and maps each job start and end time by pid
+     * Process file lines concurrently using parallel stream
+     * Maps the jobs by their pid
      */
-    private static Map<Integer, Job> processLogs(String filename) {
+    static Map<Integer, Job> processLogs(String filename) {
         Map<Integer, Job> mappedJobs = new ConcurrentHashMap<>();
         Path logPath = Paths.get(filename);
 
@@ -69,9 +70,9 @@ public class Main {
 
     /**
      *
-     * Iterate through all the jobs and computes each job duration
+     * Iterate through all the jobs and computes each job duration using parallel stream
      */
-    private static void generateReport(Map<Integer, Job> mappedJobs, String outputFileName) {
+    static void generateReport(Map<Integer, Job> mappedJobs, String outputFileName) {
         List<String> reportLines = mappedJobs.entrySet().parallelStream()
                 .map(entry -> {
                     int pid = entry.getKey();
@@ -81,15 +82,8 @@ public class Main {
                         return "PID " + pid + " (" + job.getDescription() + ") is missing a START or END event.";
                     } else {
                         Duration duration = Duration.between(job.getStart(), job.getEnd());
-                        long minutes = duration.toMinutes();
-                        long seconds = duration.minusMinutes(minutes).getSeconds();
-                        String message = String.format("PID %s (%s): Duration: %d min %d sec.", pid, job.getDescription(), minutes, seconds);
-                        if (duration.compareTo(ERROR_TIME) > 0) {
-                            message += " ERROR: Job took longer than 10 minutes.";
-                        } else if (duration.compareTo(WARNING_TIME) > 0) {
-                            message += " WARNING: Job took longer than 5 minutes.";
-                        }
-                        return message;
+
+                        return getString(duration, pid, job);
                     }
                 })
                 .toList();
@@ -100,5 +94,21 @@ public class Main {
         } catch (IOException e) {
             System.err.println("Error writing report file: " + e.getMessage());
         }
+    }
+
+    private static String getString(Duration duration, int pid, Job job) {
+        long minutes = duration.toMinutes();
+        long seconds = duration.minusMinutes(minutes).getSeconds();
+        String message = String.format("PID %s (%s): Duration: %d min %d sec.", pid, job.getDescription(), minutes, seconds);
+        if (duration.compareTo(ERROR_TIME) > 0) {
+            message += " ERROR: Job took longer than 10 minutes.";
+        } else if (duration.compareTo(WARNING_TIME) > 0) {
+            message += " WARNING: Job took longer than 5 minutes.";
+        }
+        return message;
+    }
+
+    public static DateTimeFormatter getTimeFormatter() {
+        return TIME_FORMATTER;
     }
 }
